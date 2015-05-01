@@ -1,0 +1,973 @@
+## Final project for Data Analysis in R by Christopher J. Kaalund
+# Tasmanian motor vehicle crash data
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+The data for this study was obtained from:
+
+http://data.gov.au/dataset/tasmanian
+
+Here's a description of the data from the website:
+"Vehicle crash data (classified as fatal, serious, minor, first aid, property damage etc) attended by Tasmanian Police or provided by the general public via Tasmanian Police crash reports. Data for the last 10 years is provided (1 January 2004 to 2 July 2014) . Attributes include severity, descriptive collision, attendance by Police, light conditions, type of road centreline, speed limit, description of crash location, number of vehicles involved, type of vehicle, blood alcohol content, traffic controls at collision scene, x-y coordinates as EPSG:28355"
+
+I added two columns to the original csv data file, LATITUDE AND LONGITUDE. These were added by a Python program that I wrote, since I could not find the capability to convert coordinate in R. The program converted the X-Y coordinates from EPSG:28355 format to EPSG:4326 format (latitude and longitude coordinates). It used the pyproj module to do this. Y corresponds to latitude, and X to longitude.
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE}
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(GGally))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(lubridate))
+suppressPackageStartupMessages(library(qcc))
+suppressPackageStartupMessages(library(ggmap))
+suppressPackageStartupMessages(library(scales))
+```
+
+```{r,echo=TRUE}
+# Load the data
+setwd('/Users/christopherkaalund/Documents/Study/Udacity Data Science/Data Analysis in R/Final project/')
+original_dat = read.csv('crashdatall.csv',head=TRUE,sep=',')
+dat = original_dat
+```
+
+# Characteristics of the original data set
+```{r,echo=TRUE}
+names(dat)
+str(dat)
+nrow(dat)
+```
+
+There are 170564 rows in the original file. There are multiple rows for each accident, corresponding to different UNIT (vehicle) numbers, and TRAFFIC_CONTROL. Some rows are exact duplicates. e.g. for ID=1652. I'll delete these duplicates.
+
+```{r,echo=TRUE}
+# Delete first column X.1, which simply numbers the rows
+dat$X.1 = NULL
+dat = dat[!duplicated(dat), ] # delete duplicates in main data frame
+nrow(dat)
+```
+
+Once duplicates have been removed, there are 140360 rows remaining. Why were there so many duplicate rows? Perhaps a column containing extra information was removed from the the dataset by the government department that compiled the data.
+
+For analysis, it is desirable to have one row per accident, and so not as to lose too much information I'll create two new dataframes. One will contain the number of units (vehicles) in the accident, and the other will combine TRAFFIC_CONTROL for the units. These dataframes will eventually be merged into one dataframe, with one row for each ID value.
+
+```{r,echo=TRUE}
+# Group by ID and save number of vehicles into new column
+
+# This one-column data frame will eventually be merged with the final tidy
+# data frame
+no_vehicles = dat %>%
+  group_by(ID) %>%
+  summarize(NO_VEHICLES = max(UNIT_NO))
+
+# Now, remove UNIT_NO column and then remove duplicates
+dat$UNIT_NO <- NULL
+dat = dat[!duplicated(dat), ]
+nrow(dat) # There are 101716 rows after removing duplicates
+
+# I will now create a new dataframe for traffic control
+traffic_control = dat[,c("ID","TRAFFIC_CONTROL")]
+traffic_control = traffic_control[!duplicated(traffic_control),] # 76613 rows
+traffic_control = traffic_control %>% spread(TRAFFIC_CONTROL,TRAFFIC_CONTROL)
+traffic_control[2] = NULL # delete the empty 2nd column
+# concatenate columns 2~14
+traffic_control$TRAFFIC_CONTROL = do.call(paste, c(traffic_control[c(2:14)],
+                                                   sep = ","))
+removeNA1 = function(x){str_replace_all(x, "NA,", "")} # remove NA's
+removeNA2 = function(x){str_replace_all(x, ",NA", "")} # remove NA's
+traffic_control = mutate(traffic_control,
+                         TRAFFIC_CONTROL=removeNA2(removeNA1(TRAFFIC_CONTROL)))
+# delete temporary columns produced using spread
+traffic_control = traffic_control[,-c(2:14)]
+traffic_control$TRAFFIC_CONTROL = as.factor(traffic_control$TRAFFIC_CONTROL)
+```
+
+The length of the dataframe 'no vehicles' is 70394. Since this was created by grouping by the ID, this tells us that there are 70394 incidents recorded in the dataset, i.e. unique ID's. The dataframe 'traffic control' contains 70394 entries also. Note that there is only one permutation of each set of traffic conditions in this dataframe. Some information is lost when traffic control for each unit is combined into one column (possible association between traffic control and unit), but I'll assume that this is not significant. Retaining this information would result in a large number of columns and complicate the analysis.
+
+```{r,echo=FALSE}
+# A few checks
+# Largest number of vehicles in an accident
+# max(no_vehicles$NO_VEHICLES,na.rm=TRUE) # largest no. vehicles in accident
+# subset(no_vehicles,NO_VEHICLES==11) # Corresponds to ID 30112093
+# subset(original_dat,ID==30112093)
+# 
+# # Largest number of traffic_control types involved
+# levels(traffic_control$TRAFFIC_CONTROL)
+# subset(traffic_control,TRAFFIC_CONTROL=="Give way,Not controlled,
+# Not known,Other,Police,Railway crossing,Roundabout,Stop,Traffic signals,
+# Zebra crossing") # Corresponds to ID 30041857
+# subset(original_dat,ID==30041857) # Note that the number of traffic_control
+# types at the scene of an accident does not have to equal the number of
+# units or vehicles
+```
+
+Finally, BAC and UNIT_TYPE can result in multiple rows for each accident or ID. Firstly, I'll create columns for unit type.
+
+UNIT_TYPE is the type of vehicle involved in the accident, e.g. "light vehicle." I'll treat this variable in the same way that I treated traffic control. i.e. by separating out the types of units using dplyr's spread and concatenating the columns.
+
+```{r,echo=TRUE}
+# New dataframe for UNIT_TYPE
+
+unit_type = dat[,c("ID","UNIT_TYPE")]
+unit_type = unit_type[!duplicated(unit_type),] # 78702 rows
+unit_type = unit_type %>% spread(UNIT_TYPE,UNIT_TYPE)
+unit_type[2] = NULL # delete the empty 2nd column
+unit_type$UNIT_TYPE = do.call(paste, c(unit_type[c(2:12)], sep = ",")) # concatenate columns 2~12
+# remove NA's
+unit_type = mutate(unit_type,UNIT_TYPE=removeNA2(removeNA1(UNIT_TYPE)))
+# delete temporary columns produced using spread
+unit_type = unit_type[,-c(2:12)]
+unit_type$UNIT_TYPE = as.factor(unit_type$UNIT_TYPE)
+```
+
+There are many different levels for BAC, although the vast majority of cases have BAC down as 0 or NA (i.e. not recorded). The general alcohol limit in Australia is 0.05, and there are only 6 rows in the the dataframe for which this limit is exceeded. For drivers of dangerous goods or heavy vehicles, there is a 0.02 limit. There are 472 cases in the dataset for which one of the drivers was over 0.02.
+
+```{r,echo=TRUE}
+# Blood alcohol content
+
+nrow(subset(dat,BAC>0)) # Number of cases with BAC > 0 = 2754 cases
+nrow(subset(dat,BAC>0.02)) # Number of cases with BAC > 0.02 = 472 cases
+nrow(subset(dat,BAC>0.05)) # Number of cases with BAC > 0.05 = 6 cases
+
+bac = dat %>%
+  group_by(ID) %>%
+  summarize(BAC = max(BAC))
+```
+
+Now the new columns for traffic control, number of units, unit type, and BAC, must be merged with the data in the original data frame. Firstly, these columns will be removed from the dataframe dat and then duplicate rows removed. Then the resulting dataframe, which should have unique ID's, will be merged with the new columns.
+
+```{r,echo=TRUE}
+#  Merge dataframes to make final tidy data set
+
+dat["TRAFFIC_CONTROL"] = NULL # delete the old columns
+dat["UNIT_TYPE"] = NULL
+dat["BAC"] = NULL
+dat = dat[!duplicated(dat),] # dat now has 70394 rows
+
+dat = left_join(dat,no_vehicles,by="ID")
+dat = left_join(dat,unit_type,by="ID")
+dat = left_join(dat,bac,by="ID")
+dat = left_join(dat,traffic_control,by="ID")
+```
+
+Now, I have a tidy data set. i.e. each variable is saved in its own column, and each observation (accident) is saved in its own row.
+
+I'll now convert the crash date and time to standard date-time format. Also, I re-order some factors.
+
+```{r echo=TRUE}
+# Convert dates
+
+dat$CRASH_DATE = as.Date(dat$CRASH_DATE,"%d-%b-%Y")
+dat$REPORT_DATE = as.Date(dat$REPORT_DATE,"%d/%b/%y")
+# this adds today's date, which can be ignored
+dat$CRASH_TIME = as.POSIXct(dat$CRASH_TIME,format="%H:%M")
+dat$SEVERITY = factor(dat$SEVERITY,c("","Not known","Minor","Property Damage Only","First Aid","Serious","Fatal"))
+dat$LIGHT_CONDITION = factor(dat$LIGHT_CONDITION,
+                             c("","Not stated","Not known",
+                               "Darkness (without street light)",
+                               "Darkness (with street light)",
+                               "Dawn / Dusk", "Daylight"))
+```
+
+# Univariate Plots Section
+
+Note that for 2014, the data does not contain a full year's worth. Therefore, for many of the plots below that concern dates, I'll use a subset of the data that excludes 2014, dat_no2014.
+
+I'll also throw a few bivariate plots into this section to help explain a few points.
+
+```{r,echo=TRUE}
+# Univariate_Plots - dates
+
+max(dat$CRASH_DATE) # 2014-07-02
+min(dat$CRASH_DATE) # 2004-01-01
+dat_no2014 = subset(dat,CRASH_DATE<as.Date("2014-01-01"))
+
+# Examine time and date variations in crash frequency
+# Note - ignore the two bins at the ends of the plot
+ggplot(aes(x=CRASH_DATE),data=dat)+
+  geom_histogram(binwidth=30)+
+  scale_x_date(breaks="16 months",labels=date_format("%Y/%m"))+
+  ggtitle("Histogram of crash date")
+
+ggplot(aes(x=as.factor(year(CRASH_DATE))),data=dat_no2014)+
+  geom_histogram()+
+  xlab("Year")+
+  ggtitle("Histogram of crashes by year")
+
+ggplot(aes(x=month(CRASH_DATE,label=TRUE)),data=dat_no2014)+
+  geom_histogram(binwidth=1)+
+  xlab("Month")+
+  ggtitle("Histogram of crashes by month")
+
+dat_no2014$year=year(dat_no2014$CRASH_DATE)
+ggplot(aes(x=month(CRASH_DATE,label=TRUE)),data=dat_no2014)+
+  facet_wrap(~year)+
+  geom_histogram(binwidth=1)+
+  xlab("Month")+
+  ggtitle("Histogram of crashes by month")
+
+ggplot(aes(x=as.factor(day(CRASH_DATE))),data=dat_no2014)+
+  geom_histogram(binwidth=1)+
+  xlab("Day of month")+
+  ggtitle("Histogram of crashes by day of the month")
+
+ggplot(aes(x=yday(CRASH_DATE)),data=dat_no2014)+
+  geom_histogram(binwidth=1)+
+  xlab("Day of the year")+
+  ggtitle("Histogram of crashes by day of the year")
+
+ggplot(aes(x=yday(CRASH_DATE)),data=subset(dat_no2014,yday(CRASH_DATE)>330))+
+  geom_histogram(binwidth=1)+
+  xlab("Day of the year")+
+  ggtitle("Histogram of crashes by day of the year for the final month")
+
+ggplot(aes(x=wday(CRASH_DATE,label=TRUE)),data=dat_no2014)+
+  geom_histogram()+
+  xlab("Day of the week")+
+  ggtitle("Histogram of crashes by weekday")
+
+dat_no2014$month=month(dat_no2014$CRASH_DATE,label=TRUE)
+ggplot(aes(x=wday(CRASH_DATE,label=TRUE)),data=dat_no2014)+
+  facet_wrap(~month)+
+  geom_histogram()+
+  xlab("Day of the week")+
+  ggtitle("Histogram of crashes by weekday")
+
+ggplot(aes(x=as.numeric(REPORT_DATE-CRASH_DATE)),data=dat_no2014)+
+  geom_histogram(binwidth=7)+
+  scale_x_continuous(limits=c(0,200))+
+  xlab("Difference between report and crash dates (days)")+
+  ggtitle("Histogram of difference between report and crash dates")
+
+max(as.numeric(dat$REPORT_DATE-dat$CRASH_DATE))
+min(as.numeric(dat$REPORT_DATE-dat$CRASH_DATE)) # -ve must be an error in data
+
+ggplot(aes(x=hour(CRASH_TIME)+minute(CRASH_TIME)/60),data=dat)+
+  geom_histogram(binwidth=1)
+
+dat_no2014$wday=wday(dat_no2014$CRASH_DATE)
+ggplot(aes(x=hour(CRASH_TIME)+minute(CRASH_TIME)/60),data=dat_no2014)+
+  geom_histogram(binwidth=1)+
+  facet_wrap(~wday)
+
+# Note: the minutes in CRASH_DATE varies from 0 to 12, not to the full range
+# of 60 min. There is likely something wrong with the data
+min(minute(dat$CRASH_TIME))
+max(minute(dat$CRASH_TIME))
+```
+
+The plots of crash frequency against various time and date variables show some clear trends. The histogram of crashes by day of the week shows that the least number of crashes occurs on the weekend, and that it rises throughout the week and peaks on Friday.
+
+The plot of motor vehicle accidents against day of the month shows that there is a decrease in the number of crashes on the 31st, which is clearly because few months contain a 31st day.
+
+The slowest month for crashes is September (around 5000 per month), and this increases through to December (around 6000 per month). There is also a spike in March for the accident rate averaged over all years. This spike does not happen for every year, however. Faceting over year shows that the only really consistent feature is the minimum in accident rates in September, which occurs for 7 out of 10 years. I cannot think of a reason for this. September does not correspond to any major holiday in Tasmania.
+
+Plotting accident rate against day of the year shows a drop towards the end of the year, but plotting by month does not show a decrease in December. This could be because that, for the last few days of December, between Christmas and New Year, there is decrease in traffic volume, however there is an increase in traffic volume in the week or two preceding Christmas. It would be necessary to examine traffic volume data to confirm this.
+
+There was a decline in accident rates between the years 2009 and 2012 from around 7000 to 6000 per year, with a slight increase occuring in 2013. I speculate that this is due to road improvements and safety campaigns. Looking at Tasmania's population size on the Australian Bureau of Statistic's website, there is a steady increase in population over time, with the rate of increase slowing at around 2010. Population decline cannot account for the decline in accident rates.
+
+The vast majority of crashes are reported within a week of the event. There is a long, thin tail going out to around 200 days, and outliers at -366 (an error) and 1078 days.
+
+In terms of time, crashes peak at around 3 - 5 pm in the afternoon, and there is a smaller peak between 8 and 9 am. These peaks correspond to peak hour traffic, and occur only on weekdays. There is a minimum in crash frequency at around 4 - 5 am.
+
+Some frequency histograms of other variables are given below. For those variables with a large number of factors, I made Pareto plots of the top ten factors.
+
+```{r,echo=TRUE,warning=FALSE}
+# More univariate plots
+ggplot(aes(x=SEVERITY),data=dat)+geom_bar()+
+  theme(axis.text.x=element_text(angle=90,hjust=1))+
+  stat_bin(geom="text", aes(label=..count.., vjust=-1))
+
+pareto.chart(table(dat$SEVERITY))
+
+ggplot(aes(x=DCA),data=dat)+
+  geom_bar()+
+  theme(axis.text.x=element_text(angle=90,hjust=1))+
+  stat_bin(geom="text", aes(label=..count.., vjust=-1))
+DCAtab = table(dat$DCA)
+
+pareto.chart(head(DCAtab[order(DCAtab,decreasing=T)],10),
+             cex.names=0.7,
+             main="Pareto chart for DCA (description of collision), top ten")
+
+#ggplot(aes(x=TRAFFIC_CONTROL),data=traffic_control)+
+# geom_bar()+
+# theme(axis.text.x=element_text(angle=90,hjust=1))
+TCtab = table(dat$TRAFFIC_CONTROL)
+pareto.chart(head(TCtab[order(TCtab,decreasing=T)],10),
+             cex.names=0.75,
+             main="Pareto chart for TRAFFIC_CONTROL, top ten")
+
+ggplot(aes(x=VISITED),data=dat)+
+  geom_bar()+
+  theme(axis.text.x=element_text(angle=90,hjust=1))+
+  stat_bin(geom="text", aes(label=..count.., vjust=-1))
+
+ggplot(aes(x=SURFACE_TYPE),data=dat)+
+  geom_bar()+
+  theme(axis.text.x=element_text(angle=90,hjust=1))+
+  stat_bin(geom="text", aes(label=..count.., vjust=-1))
+
+ggplot(aes(x=LIGHT_CONDITION),data=dat)+
+  geom_bar()+
+  theme(axis.text.x=element_text(angle=90,hjust=1))+
+  stat_bin(geom="text", aes(label=..count.., vjust=-1))
+
+ggplot(aes(x=CENTRELINE),data=dat)+
+  geom_bar()+theme(axis.text.x=element_text(angle=90,hjust=1))+
+  stat_bin(geom="text", aes(label=..count.., vjust=-1))
+
+CENTRELINEtab = table(dat$CENTRELINE)
+pareto.chart(CENTRELINEtab[order(CENTRELINEtab,decreasing=T)],
+             cex.names=0.75,main="Pareto chart for CENTRELINE")
+
+ggplot(aes(x=SPEED_ZONE),data=dat)+
+  geom_bar()+theme(axis.text.x=element_text(angle=90,hjust=1))+
+  stat_bin(geom="text", aes(label=..count.., vjust=-1))
+
+ggplot(aes(x=as.factor(NO_VEHICLES)),data=dat)+
+  geom_bar()+
+  ggtitle("Number of vehicles involved in the accident")+
+  stat_bin(geom="text", aes(label=..count.., vjust=-1))
+
+ggplot(aes(x=as.factor(UNIT_TYPE)),data=dat)+
+  geom_bar()+
+  ggtitle("Type of vehicle")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+UTtab = table(dat$UNIT_TYPE)
+pareto.chart(head(UTtab[order(UTtab,decreasing=T)],10),
+             cex.names=0.75,
+             main="Pareto chart for type of vehicle, top ten")
+# Note that a single 'light vehicle' also includes light vehicle+light
+# vehicle combination
+UTtab = table(original_dat$UNIT_TYPE)
+pareto.chart(head(UTtab[order(UTtab,decreasing=T)],10),
+             cex.names=0.75,main="Pareto chart for type of vehicle, top ten")
+
+ggplot(aes(x=BAC),data=dat)+
+  geom_bar()+
+  ggtitle("Blood alcohol content")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+ggplot(aes(x=BAC),data=subset(dat,BAC>0))+
+  geom_bar()+
+  ggtitle("Blood alcohol content, non-zero")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+Here is a summary of the findings obtained from the above charts:
+
+1. Most accidents are not serious, and simply result in property damage.
+2. There are a great variety of accident types. The main type of accident is a rear end collision.
+3. Most accidents are "not controlled", i.e. no traffic lights or roundabouts at the scene of the collision.
+4. Around 2/3 of accidents are visited by the police.
+5. The majority of accidents occur on sealed roads.
+6. Most accidents occur in daylight. Around 1/5 occur in the dark (with or without streetlights).
+7. Most accidents occur on roads with a single unbroken line or no line.
+8. Most accidents occur in a 50 km/h zone, followed by 60 and 100 km/h zones. Note that there are two speed limits denoted "O4S" and "O4L". Comparing these limits with location or accident description shows that "O4L" is associated with "off road" and "O4S" is associated with parked vehicles or possibly footpaths or parking lots. The difference between "04L" and "O4S" is not clear.
+9. Most accidents involve two vehicles, and around half as much involve only one vehicle.
+10. The vast majority of accidents involve light vehicles (e.g. sedans).
+11. For most accidents, the blood alcohol content of the driver is unknown. When it was known, it was mostly zero. When it was non-zero, it was almost always less than the regular legal limit (0.05).
+
+I will produce some maps to show how accidents vary with location.
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+# Location plots
+
+# Firstly, a map of accidents of the whole state of Tasmania, faceted by
+# severity
+levelstoplot = c("Fatal","First Aid","Minor","Not known",
+                 "Property Damage Only","Serious")
+
+# I'll create a subset of the data, datsubset, with the empty level in
+# SEVERITY excluded. (Two rows omitted)
+datsubset = subset(dat,SEVERITY%in%levelstoplot) # does not include blanks
+
+tasmap1 = get_map(location=c(lon=mean(dat$LONGITUDE),
+                             lat=mean(dat$LATITUDE)),
+                  zoom=7,
+                  maptype="roadmap",
+                  scale="auto")
+
+ggmap(tasmap1)+
+  geom_point(data=datsubset,aes(x=LONGITUDE,y=LATITUDE,alpha=1/100),
+             size=2,shape=21,fill="red")+
+  facet_wrap(~SEVERITY)+
+  guides(fill=FALSE,alpha=FALSE,size=FALSE)
+
+# Now, a density map of all accidents for the entire state. The two main cities, Hobart and Launceston, stand out as having the highest number of accidents
+ggmap(tasmap1)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1),
+    size=2,bins=4,data=datsubset,
+    geom="polygon")+
+  guides(fill=FALSE,alpha=FALSE,size=FALSE)
+```
+
+The first map shows all of Tasmania, and is faceted by accident severity. It shows that accidents occur predominantly in areas that are not covered in forest, as one would expect. Major highways, connecting population centres, are clearly visible, with accidents distributed along their length. This map suffers from overplotting, even with alpha set to 1/100.
+
+The second map shows all of Tasmania, and is a density plot. It shows that the majority of accidents occur in Tasmania two largest cities, Launceston and the capital of Hobart.
+
+The following maps focus on Hobart, the capital city.
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+# The following maps focus on Hobart
+
+tasmap2 = get_map(location="hobart",zoom=14,maptype="roadmap",scale="auto")
+
+# Density map for Hobart for all types of accidents
+ggmap(tasmap2)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1,fill=..level..),
+    size=2,bins=10,data=datsubset,
+    geom="polygon")+
+  guides(alpha=FALSE,size=FALSE)
+
+# Map faceted by accident severity. Note that one of the maps shows tearing of
+# the contours. This is a known problem with ggplot2 and should be recitified
+# in future versions
+ggmap(tasmap2)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1,fill=..level..),
+    size=2,bins=10,data=datsubset,
+    geom="polygon")+
+  guides(alpha=FALSE,size=FALSE)+
+  facet_wrap(~SEVERITY)
+
+# Map faceted by light condition
+lightcond = c("Darkness (with street light)","Darkness (without street light)","Dawn / Dusk","Daylight","Not known","Not stated" )
+ggmap(tasmap2)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1,fill=..level..),
+    size=2,bins=10,data=subset(datsubset,LIGHT_CONDITION %in% lightcond),
+    geom="polygon")+
+  guides(alpha=FALSE,size=FALSE)+
+  facet_wrap(~LIGHT_CONDITION)
+
+# Faceted by hour of the day
+datsubset$HOUR = hour(datsubset$CRASH_TIME)
+ggmap(tasmap2)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1,fill=..level..),
+    size=2,bins=10,data=datsubset,
+    geom="polygon")+
+  guides(alpha=FALSE,size=FALSE)+
+  facet_wrap(~HOUR)
+
+# Faceted by day of the week
+datsubset$WEEKDAY = wday(datsubset$CRASH_DATE,label=TRUE)
+ggmap(tasmap2)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1,fill=..level..),
+    size=2,bins=10,data=datsubset,
+    geom="polygon")+
+  guides(alpha=FALSE,size=FALSE)+
+  facet_wrap(~WEEKDAY)
+
+# Faceted by year
+dat_no2014$YEAR = year(dat_no2014$CRASH_DATE)
+ggmap(tasmap2)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1,fill=..level..),
+    size=2,bins=10,data=dat_no2014,
+    geom="polygon")+
+  guides(alpha=FALSE,size=FALSE)+
+  facet_wrap(~YEAR)
+
+# Faceted by traffic control
+ggmap(tasmap2)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1,fill=..level..),
+    size=2,bins=5,
+    data=subset(datsubset,
+                TRAFFIC_CONTROL%in%c("Not controlled","Traffic signals",
+                                     "Give way,Not controlled",
+                                     "Roundabout","Give way")),
+    geom="polygon")+
+  guides(alpha=FALSE,size=FALSE)+
+  facet_wrap(~TRAFFIC_CONTROL)
+
+# Faceted by CRASH_CODE
+datsubset$CRASH_CODE = substr(datsubset$DCA,1,3)
+# Old top10codes = c(130,149,110,181,160,144,171,183,146,120)
+top10codes = c(130,110,149,160,120,144,121,181,147,146)
+ggmap(tasmap2)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1,fill=..level..),
+    size=2,bins=5,data=subset(datsubset,CRASH_CODE %in% top10codes),
+    geom="polygon")+
+  guides(alpha=FALSE,size=FALSE)+
+  facet_wrap(~CRASH_CODE)
+```
+
+I created a column, CRASH_CODE, which is a three digit number in the accident description column DCA. Using the full description in the map results in making the graph unreadable due to the length of the descriptions. Only the top ten accident descriptions are reported.
+
+The above maps focus on Tasmania's largest city, Hobart. The map faceted by SEVERITY show that accidents designated "Property Damage Only" are more focussed in extent, with a sharp peak at a particular point that below will be shown to be a roundabout. This may be explained by the following map, which is facetted by light condition. More severe accidents are likely to occur in poor light conditions. During daylight hours, traffic seems to be focussed in the CBD region, and the density map for "Daylight" looks very much like that for "Property Damage Only." Serious accidents are more spread out, as are those that occur in darkness.
+
+The next map facets by hour of the day, and so displays 24 sub-maps. There is a bridge in the top right corner on which accidents appear to occur only at certain hours, such as 5pm, corresponding to peak hour traffic.
+
+The map following this shows accident rate facetted by day of the week, where 1=Sunday and 7=Saturday. The distribution of accidents does not change greatly. Next follows a map of accident distribution by year. (2014 not included, as data for this year is incomplete.) This distribution becomes more focussed over time, although the reason for this does not immediately present itself. A hot spot that was vaguely defined in 2004 becomes very prominent by 2014. This will be identified below as a particular roundabout.
+
+Next follows a map of accidents faceted by traffic control signals (give way, roundabout &c.) As one might expect, traffic signals are concentrated around the CBD, and there are few roundabouts. The next map shows accidents facetted by CRASH_CODE, the first three numbers in the accident description. Only the top ten crash descriptions are shown, since there are too many to plot in total. The top ten codes are:
+- 130 Vehicles in same lane/ rear end
+- 110 Cross traffic
+- 149 Other maneuvering
+- 160 Parked
+- 120 Wrong side/other head on (not overtaking)
+- 144 Parking vehicles only
+- 121 Right through
+- 181 Off right bend into object/parked vehicle
+- 147 Emerging from driveway or lane
+- 146 Reversing into fixed object or parked vehicle
+
+It is difficult to associate a particular CRASH_CODE, or description, with traffic control by simply comparing the two maps.
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+# Zoom up to street level - shows hotspot near the roundabout
+tasmap3 = get_map(location=c(lon=147.331,lat=-42.878),zoom=18,
+                  maptype="roadmap",scale="auto")
+
+# This map shows a roundabout where the highest number of accidents occurs
+ggmap(tasmap3)+
+  stat_density2d(
+    aes(x=LONGITUDE,y=LATITUDE,alpha=1,fill=..level..),
+    size=2,bins=5,data=datsubset,
+    geom="polygon")
+
+# Facetted by accident severity
+ggmap(tasmap3)+
+  geom_point(data=datsubset,aes(x=LONGITUDE,y=LATITUDE,alpha=1/100,
+                                fill=SEVERITY),size=2,shape=21)+
+  facet_wrap(~SEVERITY)+
+  guides(alpha=FALSE)
+```
+
+# Univariate Analysis
+
+### What is the structure of your dataset?
+The dataset is a CSV file with 22 columns and 170564 rows. The dataset contains 22 variables, although I added two of these variables (LATITUDE and LONGITUDE, both functions of X and Y) to the original using a Python program before loading into R. Most of the variables are categorical/factor, such as SEVERITY and DCA. Only a few are continuous: CRASH TIME, LATITUDE AND LONGITUDE, BAC (blood alcohol content). An integer variable, ID, identifies each incident, and there are multiple rows for each incident to take into account multiple values for some variables, e.g. NO_VEHICLES.
+
+### What is/are the main feature(s) of interest in your dataset?
+The frequency of crashes and their severity are of primary interest. Understanding when and where crashes occur, and factors that increase the likelihood of crashes, could be valuble for implementing measures to improve road safety.
+
+### What other features in the dataset do you think will help support your investigation into your feature(s) of interest?
+There are many variables in the dataset that are useful in predicting crash incidence and severity, such as time and speed zone. Some are less useful, for example BAC, since very few accidents involve people with high BAC. Some variables contain a huge number of levels (e.g. DCA, accident description), and it is difficult to relate these variables to accident rate.
+
+### Did you create any new variables from existing variables in the dataset?
+Yes, I created LATITUDE and LONGITUDE from Y and X. Google maps (which I accessed through ggmaps) uses LATITUDE and LONGITUDE, whereas the dataset supplied coordinates in EPSG:28355 format, and so I had to convert from the latter to the former. In addition, to facilitate plotting, I extracted week number, hour, and year from the CRASH_TIME variable. 
+
+### Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+I wouldn't say that any distributions were unusual in the sense of being difficult to explain, although I did not find any that matched nice theoretical distributions (e.g. normal). The graph of accident rate against time is not too difficult to understand, for example, showing a minimum in the early hours of the morning, and two spikes at peak hours, as well as other interesting features.
+
+I changed some variables by gathering multiple rows into one row. For example, TRAFFIC CONTROL was spread across multiple rows, and I concatentated these so as to obtain one row per incident. Likewise for BAC, UNIT TYPE, and UNIT NO. The result was a 'tidy' data set, which is necessary to calculate the frequency of accidents and avoid double-counting. Also, I removed some rows that were exact duplicates.
+
+# Bivariate Plots Section
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+
+# Scatterplot matrix. Some variables are not included. e.g. YEAR, since I am not interested in long-term trends for this plot, or LATITUDE, which is most appropriately used with a map
+sample_cols = c("SEVERITY","CRASH_CODE","HOUR","WEEKDAY","SURFACE_TYPE",
+                "LIGHT_CONDITION","CENTRELINE","SPEED_ZONE","BAC",
+                "TRAFFIC_CONTROL")
+dat_samp <- datsubset[sample(1:length(dat$ID), 500),sample_cols]
+ggpairs(dat_samp, params = c(shape = I('.'), outlier.shape = I('.')))
+```
+
+The scatterplot matrix above suggests that a number of variables may be correlated in some way, however the small sample size may make variables look correlated when in fact they aren't. Of course, some variables such as LIGHT_CONDITION and HOUR will be correlated for obvious reasons. There are 43 non-trivial combinations of variables, and I will plot the more interesting ones below.
+
+A bivariate histogram shows frequencies across two variables. The plots below consist mainly of histograms which are faceted by another variable. The CRASH_TIME is one of the few continuous variables, and so a boxplot for this variable is possible.
+
+Firstly, I'll make some plots involving time variables, such as year, week, and hour.
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+severity_levels = c("Fatal","First Aid","Minor","Not known",
+                    "Property Damage Only","Serious")
+dat_yearplot = subset(dat,SEVERITY%in%severity_levels &
+                        CRASH_DATE<as.Date("2014-01-01"))
+ggplot(aes(x=as.factor(year(CRASH_DATE))),data=dat_yearplot)+
+  geom_freqpoly(aes(group=SEVERITY,colour=SEVERITY))
+
+ggplot(aes(x=as.factor(year(CRASH_DATE))),
+       data=subset(dat_yearplot,SEVERITY%in%c("Fatal","Serious")))+
+  geom_freqpoly(aes(group=SEVERITY,colour=SEVERITY))
+
+dat_yearplot$CRASH_CODE = substr(dat_yearplot$DCA,1,3)
+ggplot(aes(x=as.factor(year(CRASH_DATE))),
+       data=subset(dat_yearplot,CRASH_CODE%in%top10codes))+
+  geom_freqpoly(aes(group=CRASH_CODE,colour=CRASH_CODE))
+
+datsubset$WEEKDAY = as.factor(datsubset$WEEKDAY)
+datsubset$HOUR = as.factor(datsubset$HOUR)
+ggplot(aes(x=HOUR),data=datsubset)+
+  geom_freqpoly(aes(group=WEEKDAY,colour=WEEKDAY),binwidth=1)
+
+ggplot(aes(x=wday(CRASH_DATE,label=TRUE)),data=datsubset)+
+  geom_histogram(stat='bin', binwidth=1)+
+  facet_grid(SEVERITY~.,scales="free_y")
+
+ggplot(aes(x=LIGHT_CONDITION),data=datsubset)+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_grid(SEVERITY~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+Firstly,  I plotted crash frequency against year for different SEVERITY levels. I will discuss this in more detail in the final plots section. Some levels in SEVERITY are blanks, so I filter them out. Also, 2014 does not contain a full year's data, and so I omit it. Accidents with "Property Damage Only" seem to be trending down in recent years, but there is a blip upwards in 2013.
+
+The next graph shows the same plot, but with serious and fatal accidents only. The overall trend is one of decline.
+
+I then plot accident rate for year and CRASH_CODE. Code 130 (Vehicles in same lane/rear end) shows a similar trend to "Property Damage Only" in the previous graphs. Perhaps there is there an association between these crash codes and severity levels. Code 149 (Other maneuvering) shows an increasing trend, unlike most of the other crash codes.
+
+Next is a frequency polygon graph, which shows accident count for different hours and different days of the week very clearly, and shows some interesting
+features. I'll discuss this more in the final plots section.
+
+The next plot shows accident frequency against weekday, faceted by SEVERITY. Fatal and serious crashes appear to be more common on weekends.
+
+Finally, I plot a histogram of accident frequency against light conditions. The chances of a crash being fatal or serious in dark conditions (no street light) is higher compared to conditions with more light.
+
+And now, a few more plots with time variables:
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+ggplot(aes(x=hour(CRASH_TIME)+minute(CRASH_TIME)/60),
+       data=subset(datsubset,CRASH_CODE%in%top10codes))+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_grid(CRASH_CODE~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+ggplot(aes(x=wday(CRASH_DATE,label=TRUE)),
+       data=subset(datsubset,CRASH_CODE%in%top10codes))+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_grid(CRASH_CODE~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+ggplot(aes(x=LIGHT_CONDITION),data=subset(datsubset,CRASH_CODE%in%top10codes))+
+  geom_bar()+
+  facet_grid(CRASH_CODE~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+labelstoplot = c("Darkness (with street light)",
+                 "Darkness (without street light)","Dawn / Dusk","Daylight",
+                 "Not known","Not stated")
+ggplot(aes(x=wday(CRASH_DATE,label=TRUE)),
+       data=subset(datsubset,LIGHT_CONDITION%in%labelstoplot))+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_wrap(~LIGHT_CONDITION,scales="free")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+ggplot(aes(x=wday(CRASH_DATE,label=TRUE)),data=datsubset)+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_wrap(~CENTRELINE,scales="free")+  
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+The first of the plots above shows crash frequency against hour and the top ten crash codes. Are certain types of crashes more likely at different times? Yes, crash codes 160 and 181 are relatively more likely late at night. These crash codes involve parked cars, which makes sense considering that most cars will be parked at these times. Some crash codes have spikes at peak hour (e.g. 130), and for others these are missing (e.g. 110)
+
+The next plot shows crash frequency against weekday and CRASH_CODE. There are differences in types of crashes that occur on different days. For example, some types of crashes are more likely to occur on weekends relative to other types.
+
+Next, a plot of accident frequency for different light conditions and crash codes. For some types of accidents, a higher proportion of accidents occur in
+darkness relative to daylight than for other types of accidents.
+
+Following this, a histogram of crash frequency against weekday and light conditions. This is similar to the histogram with weekday and hour of the day. Crashes in daylight hours are more likely to occur on weekdays, whereas crashes in dark conditions occur with higher frequency on weekends.
+
+Finally, crash frequency against weekday and centreline. For some reason, accidents on roads with "double one broken - one continuous" are higher than normal on Saturday and Sunday.
+
+Now, some graphs featuring the variable CENTRELINE.
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+ggplot(aes(x=CENTRELINE),data=datsubset)+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_grid(SEVERITY~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+ggplot(aes(x=SPEED_ZONE),data=datsubset)+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_grid(CENTRELINE~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+The first of the graphs above shows that fatal accidents seem to be more common with double continuous lines compared to no lines, and that the trend is reversed for minor accidents, for example. Perhaps this a reflection of diffences in speed zone for these types of roads.
+
+No centreline is more common for lower speed zones, double continuous more common for higher speed zones. Speed could explain why accident severity differs with centrelines.
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+ggplot(aes(x=SPEED_ZONE),data=datsubset)+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_grid(SEVERITY~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+Fatal and serious accidents are more common at higher speed
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+ggplot(aes(x=TRAFFIC_CONTROL),
+       data=subset(datsubset,
+                   TRAFFIC_CONTROL%in%c("Not controlled","Traffic signals",
+                                        "Give way,Not controlled",
+                                        "Roundabout","Give way")))+
+  geom_histogram(stat='bin')+
+  facet_grid(SEVERITY~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+Since there are so many levels in TRAFFIC_CONTROL, I considered the top five only. Traffic signals seem to decrease the proportion of fatal and serious accidents compared to accidents where there's no control
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+ggplot(aes(x=CENTRELINE),data=subset(datsubset,CRASH_CODE%in%top10codes))+
+  geom_bar()+
+  facet_grid(CRASH_CODE~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+There is a significant variation in the distributions of crash frequency across CENTRELINE between different crash codes. For example, for code 130 (rear end), relatively few crashes occur where there is no centreline, and most occur where there is a single broken line. For all other accident types, the likelihood of an accident occuring where there is no centreline is much higher. Perhaps this is related to the speed zone, as 130 tends to occur more at higher speed. Also, single broken lines occur more often for higher speed zones.
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+ggplot(aes(x=SPEED_ZONE),data=subset(datsubset,CRASH_CODE%in%top10codes))+
+  geom_bar()+
+  facet_grid(CRASH_CODE~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+ggplot(aes(x=TRAFFIC_CONTROL),
+       data=subset(datsubset,
+                   CRASH_CODE%in%top10codes &
+                     TRAFFIC_CONTROL%in%c("Not controlled",
+                                          "Traffic signals",
+                                          "Give way,Not controlled",
+                                          "Roundabout","Give way")))+
+  geom_bar()+
+  facet_grid(CRASH_CODE~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+The first of the above graphs shows that there are differences in the types of crashes that occur in different speed zones. Code 120 (wrong side/other head on), for example, tends to occur more often at higher speeds. The next graphs shows that most types of accidents occur where there is no traffic control. Code 110 (cross traffic), howver, occurs most often at an intersection with "Give way/Not controlled"" and also quite frequently at traffic signals, as one might expect.
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+ggplot(aes(x=SPEED_ZONE),data=datsubset)+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_grid(SURFACE_TYPE~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+ggplot(aes(x=SPEED_ZONE),data=datsubset)+
+  geom_histogram()+
+  facet_grid(LIGHT_CONDITION~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+ggplot(aes(x=SPEED_ZONE),
+       data=subset(datsubset,
+                   TRAFFIC_CONTROL%in%c("Not controlled","Traffic signals",
+                                        "Give way,Not controlled",
+                                        "Roundabout","Give way")))+
+  geom_histogram()+
+  facet_grid(TRAFFIC_CONTROL~.,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+The first of the above three plots shows, perhaps not unsurprisingly, that a higher proportion of accidents occur at high speed on unsealed roads compared to sealed roads. The next plot indicates that there are more crashes at high speed in dark conditions. The third plot shows that more accidents occurs at higher speed (100 km/h) for the case of no traffic control.
+
+The following graphs focus on blood alcohol content (BAC).
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+# Blood alcohol content and hour/day of week. Filter out NA's (BAC not recorded) # using na.omit. Also, use jitter to spread out the data, since the minutes data
+# was no good in the original data set.
+ggplot(aes(x=HOUR,y=BAC),data=na.omit(subset(datsubset,BAC>0)))+
+  geom_point(alpha=1/4,position=position_jitter(width=0.5,height=0))
+
+ggplot(aes(x=HOUR,y=BAC),
+       data=na.omit(subset(datsubset,BAC>0)))+
+  geom_boxplot()
+
+ggplot(aes(x=wday(CRASH_DATE,label=TRUE),y=BAC),
+       data=na.omit(subset(datsubset,BAC>0)))+
+  geom_point(alpha=1/4,position=position_jitter(width=0.5,height=0))
+
+ggplot(aes(x=wday(CRASH_DATE,label=TRUE),y=BAC),
+       data=na.omit(subset(datsubset,BAC>0)))+
+  geom_boxplot()
+```
+
+There are very few cases for which BAC is greater than the legal limit of 0.05. BAC seems to be higher in the evening and early hours of the morning, as well as on weekends.
+
+# Bivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?
+
+This section consisted mainly of frequency histograms plotted against one variable and faceted against another, since crash frequency was a main variable of interest. Crash severity is another feature of interest.
+
+There were many interrelationships between the different variables, and some features only became apparent when faceting was used to make separate out histograms. For example, fatal and serious accidents are more common in dark conditions, for obvious reasons. They are also more common on weekends, and this is not the case for minor accidents. The reason for this is not so obvious, but one could speculate that more cars travel at night on weekends. Another example is that of CENTRELINE (ie. line marking down the centre of the road.) Fatal accidents occur more often with double continuous lines. This is likely because this type of marking is associated with higher speed limits, which a graph of accident frequency for different speed zones and centrelines suggested. Fatal and serious accidents were also shown to be more common at higher speeds. Speed also interacts with the road surface, and crashes on unsealed roads are more common than for sealed roads to occur at high speed.
+
+### Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?
+
+Certain types of accidents (crash codes) were more frequent on weekends. Code 130 (rear end) is less common on weekends, whereas code 181 (crash into parked vehicle) is more common on weekends, for example. The reason why could be that traffic is heavier on weekdays, and cars are more likely to be parked on suburban streets on the weekend.
+
+### What was the strongest relationship you found?
+
+The crash frequency strongly varies with location, as was found in a previous section for which crashes were mapped. In this section on bivariate plots, other variables were explored, and crash frequency also varied significantly for these. It is not immediately obvious which of these has the strongest effect on crash frequency, although speed has a strong effect for certain kinds of accidents (fatal and serious crashes). Fatal crashes are over five times more common at 100km/h than at 50km/h, however minor accidents are more common at 50km/h.
+
+# Multivariate Plots Section
+In this section, I'll explore some of the trends in accidents over time, as well as variations with weekday and time. Since the interesting plots consider frequencies, the multivariate plots below consist of frequencies across three variables. I'll also show some maps of accident location against two variables.
+
+```{r,echo=TRUE,message=FALSE,warning=FALSE}
+ggplot(aes(x=hour(CRASH_TIME)+minute(CRASH_TIME)/60),data=datsubset)+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_grid(SEVERITY~WEEKDAY,scales="free_y")+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+# Frequency polygon
+ggplot(aes(x=HOUR),data=datsubset)+
+  geom_freqpoly(aes(group=WEEKDAY,colour=WEEKDAY),binwidth=1)+
+  facet_grid(SEVERITY~.,scales='free_y')
+
+# Histogram for SPEED, LIGHT_CONDITION, SURFACE_TYPE.
+# Use a subset of the data for clearer plot.
+dat4 = dat[,c('CRASH_TIME','SPEED_ZONE','LIGHT_CONDITION','SURFACE_TYPE')]
+dat4$SPEED_ZONE_NUM = as.numeric(as.character(dat4$SPEED_ZONE))
+dat4$SPEED = "MEDIUM"
+dat4$SPEED[dat4$SPEED_ZONE_NUM<60] = "SLOW"
+dat4$SPEED[dat4$SPEED_ZONE_NUM>80] = "FAST"
+dat4$SPEED = as.factor(dat4$SPEED)
+dat4$SPEED = factor(dat4$SPEED,c("SLOW","MEDIUM","FAST"))
+dat5 = subset(dat4,LIGHT_CONDITION%in%
+                c("Darkness (without street light)","Daylight") &
+                SURFACE_TYPE%in%c("Sealed","Unsealed"))
+ggplot(aes(x=SPEED),data=dat5)+
+  geom_histogram(stat='bin',binwidth=1)+
+  facet_grid(SURFACE_TYPE~LIGHT_CONDITION)+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+# Since the numbers vary widely, I'll use a log scale.
+ggplot(aes(x=SPEED),data=dat5)+
+  geom_histogram(stat='bin',binwidth=1)+
+  scale_y_log10()+
+  facet_grid(SURFACE_TYPE~LIGHT_CONDITION)+
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+# Map of accidents at roundabout, facetted by CRASH_CODE
+ggmap(tasmap3)+
+  geom_point(data=subset(datsubset,CRASH_CODE%in%top10codes),
+             aes(x=LONGITUDE,y=LATITUDE,alpha=1/100,fill=SEVERITY),
+             size=2,shape=21)+
+  facet_wrap(~CRASH_CODE)+
+  guides(alpha=FALSE)
+
+# Hobart CBD
+ggmap(tasmap2)+
+  geom_point(data=subset(datsubset,CRASH_CODE%in%top10codes),
+             aes(x=LONGITUDE,y=LATITUDE,alpha=1/100,fill=CRASH_CODE),
+             size=2,shape=21)+
+  facet_wrap(~SEVERITY)+
+  guides(alpha=FALSE)+
+  scale_fill_brewer(palette="Paired")
+
+ggmap(tasmap2)+
+  geom_point(data=subset(datsubset,CRASH_CODE%in%top10codes),
+             aes(x=LONGITUDE,y=LATITUDE,alpha=1/100,fill=SEVERITY),
+             size=2,shape=21)+
+  facet_wrap(~CRASH_CODE)+
+  guides(alpha=FALSE)
+
+ggmap(tasmap2)+
+  geom_point(data=subset(datsubset,
+                         CRASH_CODE%in%top10codes&SPEED_ZONE!="999"),
+             aes(x=LONGITUDE,y=LATITUDE,alpha=1/100,fill=CRASH_CODE),
+             size=2,shape=21)+
+  facet_wrap(~SPEED_ZONE)+
+  guides(alpha=FALSE)+
+  scale_fill_brewer(palette="Paired")
+
+# BAC=0 data included
+ggplot(aes(x=HOUR,y=BAC),data=na.omit(datsubset))+
+  geom_point(alpha=1/4,position=position_jitter(width=0.5,height=0))+
+  geom_line(aes(colour=WEEKDAY,group=WEEKDAY),stat='summary',fun.y=median)+
+  coord_cartesian(ylim=c(0,0.0125))
+
+# Median blood alcohol count (BAC), BAC>0
+ggplot(aes(x=HOUR,y=BAC),data=na.omit(subset(datsubset,BAC>0)))+
+  geom_line(aes(colour=WEEKDAY,group=WEEKDAY),stat='summary',fun.y=median)+
+  facet_wrap(~WEEKDAY)+
+  theme(legend.position="none")
+```
+
+# Multivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?
+Crash frequency is the main variable of interest. Multivariate histograms require that one axis is the accident count. Looking at the multivariate histogram of crash frequency against time and day of the week, faceted by SEVERITY, it can be seen that the same trends occur across all SEVERITY levels, although the number of serious accidents at nighttime relative to daytime is higher on weekends. This is true to a lesser extent for less serious accidents. Light conditions (i.e. darkness), alcohol consumption, and driver fatigue are possible reasons for this. The following frequency polygon shows some of the trends more clearly, and this will be discussed in the final plots section.
+
+The next set of histograms attempts to relate driving conditions to eachother. Histograms of accident rates are shown against three variables: SPEED (not actual speed, but speed limit arbitrarily classified into slow, medium, and fast), SURFACE_TYPE (limited to sealed and unsealed), and LIGHT CONDTION (limited to Darkness without street light and Daylight). Most accidents occur in daylight. The dataset does not contain traffic volume information, and so some proportions cannot be compared. For example, the proportions of high speed limit to slow speed limit roads between sealed and unsealed roads may be different. Determining the probabilities of accidents at different speed limits for different road conditions requires assumptions to be made. If I assume equal traffic volume under these different conditions, then I can speculate as to why there are variations between different conditions. Higher speeds seem to increase accident rate in dark conditions on a sealed road. On a sealed road in daylight, there are fewer accidents at high speed compared to slow speeds, possibly because there are fewer lane changes or other maneuvers at high speed, and daylight improves the visibility of other vehicles. On unsealed roads, however, the number of accidents at high speeds was greater than for slow speeds, possibly because it is more difficult to control a vehicle on an unsealed road. The conclusion is that lower speed limits on unsealed roads and in dark conditions could reduce accidents.
+
+Maps are useful for road engineers or planners, as they allow the locations of different types of accidents to be determined. The first map shows accident location at a particular hotspot, a roundabout, for different severity levels and accident codes. The most common accident is type 130 (vehicles in same lane, rear end), with severity "Property Damage Only." The next map shows Hobart's CBD. The are many rear end accidents along a particular bridge and connecting road (coloured green, code 130, property damage only). Property damage tends to be commonly associated with accidents involving parked vehicles and driveways. Minor accidents, and those involving first aid, tend to be caused by cross traffic, head-on collisions, and read-ends. The map after this one reverses the faceting and colouring, and reinforces the above findings. Finally, a map is shown of accidents coloured by CRASH_CODE and facted by speed limit. The speed limit "04L" seems to be associated with off-road driving (e.g. parking stations, driveways), and the accident codes reflect this (149 Other maneuvering, 146 reversing into fixed object or parked vehicle). Speed limits 50 and 60 are very common in the CBD, whereas highways leading into the CBD have higher speed limits (70 and 80km/h) and the accidents here tend to be rear-ends, as one might expect.
+
+I finally show median blood alcohol (BAC) content against day of the week and hour. It seems to be higher on weekends, late at night, which is not unexpected. The data is sparse (few accidents with non-zero BAC), and therefore noisy.
+
+### Were there any interesting or surprising interactions between features?
+The histogram of crash frequency for different speeds and light and road conditions shows some unexpected (but not unexplainable) trends, for example the crash frequency decreasing at higher speeds for sealed roads in daylight but not for darkness. Comparing the proportions of vehicles that crash under different conditions requires additional information on traffic volumes for different conditions, which is not available in this data set. Nevertheless, it can be speculated that driving in darkness at higher speeds is more likely to result in a crash than in daylight. In daylight, driving in a higher speed limit zone is probably safer than at a lower speed limit since there are more traffic maneuvers in the latter case.
+
+### OPTIONAL: Did you create any models with your dataset? Discuss the strengths and limitations of your model.
+No.
+------
+
+# Final Plots and Summary
+
+### Plot One
+```{r echo=TRUE, Plot_One}
+ggplot(aes(x=HOUR),data=datsubset)+
+  geom_freqpoly(aes(group=WEEKDAY,colour=WEEKDAY),binwidth=1)+
+  ggtitle("Vehicle accident count by weekday and hour on Tasmanian roads")+
+  xlab("Hour of the day")+
+  ylab("Count")
+```
+
+### Description One
+I produced a bivariate plot of accident frequency against hour of the day, with multiple lines coloured by weekday. The frequency of accidents is highest during the day, likely due to higher traffic volumes, and there are two peaks on weekdays at 8am and around 4pm, corresponding to peak hour traffic. On the weekends, there are more accidents late at night. 
+
+At afternoon peak hour (around 4 or 5 pm) there seems to be an increase in accident frequency from Monday to Friday, although the accident frequency at morning peak hour is fairly constant. This could simply be due to driver fatigue. As the week progresses, drivers become tired and less alert in the afternoon hours. The peak accident rate is on Friday afternoon. Note that the more or less constant crash frequency of around 2000 on weekday morning peak hours indicates that traffic volumes are roughly constant, although this cannot be said with absolute certainty without the addition of traffic volume data that is not present in this dataset. Assuming traffic volume to be constant however, it appears that the accident rate increases after morning peak hour, possibly dipping just after lunch time, and then peaking at afternoon peak hour. Tiredness is again a good explanation for this, as accident rates are lower and more consistent between weekdays in the morning, when drivers are expected to be more alert. Driver fatigue is likely a major factor in traffic accidents.
+
+### Plot Two
+```{r echo=TRUE, Plot_Two}
+severity_levels = c("Property Damage Only","Minor",
+                    "First Aid","Serious","Fatal")
+dat_yearplot2 = subset(dat,SEVERITY%in%severity_levels &
+                        CRASH_DATE<as.Date("2014-01-01"))
+ggplot(aes(x=as.factor(year(CRASH_DATE))),data=dat_yearplot2)+
+  geom_freqpoly(aes(group=SEVERITY,colour=SEVERITY))+
+  facet_grid(SEVERITY~.,scales="free_y")+
+  ggtitle("Trend in vehicle accident rates on Tasmanian roads 2004 - 2013")+
+  xlab("Year")+
+  ylab("Count")+
+  theme(strip.text.y=element_text(size=10,angle=0))+
+  theme(legend.position="none")
+```
+
+### Description Two
+I found that using facet grid with scales="free_y" gave me the clearest graphs of trends in accident rates for different severities, due to the wide differences in accident rates. Using a log10 scale flattened the curves out too much. These graphs would be useful for traffic engineers in assessing how they've improved road safety over the years. They show that there has been an overall decrease in accident rates since 2004, with "First Aid" being an exception. There seems to have been a peak in around 2009, followed by a subsequent decline, for most levels of SEVERITY. However, an uptick seems to be evident between 2012 and 2013.
+
+### Plot Three
+```{r echo=TRUE, Plot_Three}
+surface_levels = c("Unsealed","Sealed")
+light_levels = c("Darkness (without street light)","Daylight")
+datsubset$SPEED_ZONE_NUM = as.numeric(as.character(datsubset$SPEED_ZONE))
+dat6 = subset(datsubset,SURFACE_TYPE%in%surface_levels&
+                LIGHT_CONDITION%in%light_levels&
+                SPEED_ZONE_NUM>=50&SPEED_ZONE_NUM<120)
+
+ggplot(aes(x=as.factor(SPEED_ZONE_NUM),fill=LIGHT_CONDITION),data=dat6)+
+  geom_histogram(stat='bin',binwidth=1,position="dodge")+
+  facet_grid(SURFACE_TYPE~.,scales="free_y")+
+  ggtitle("Motor vehicle accidents in Tasmania 2004-2014
+  under different conditions of light, road surface, and speed limit")+
+  xlab("Speed limit (km/h)")+
+  ylab("Count")+
+  scale_fill_discrete(name="Light Condition")
+```
+
+### Description Three
+This graph shows the number of accidents that occurred under different conditions. It excludes accidents at <50 km/h, which are quite small in number. Also, to make the analysis easier, some catagories were left out. Only sealed and unsealed roads were considered. Accidents that occur at night with street lights and at dusk were omitted. Scales were set to "free_y" so that the trends in accidents on unsealed roads could be seen, since counts are much smaller for this case. (There is a risk that a casual observer of the graph might over-estimate the number of accidents on unsealed roads because of this.) Since traffic volumes are not contained in the data set, some assumptions must be made to analyse this data. For example, it can be seen that the number of accidents that occur in daylight hours is much greater than late at night (dark conditions). This can reasonably be assumed to be due to greater numbers of cars on the road in daylight hours. Likewise, the proportion of cars driving on sealed to unsealed roads is unknown.
+
+Given the above limitations, it can still be seen that a combination of darkness, unsealed road, and high speed, increases the likelihood of an accident. On a sealed road, far more accidents occur at lower speeds in daylight. This is most likely due to the higher volume of cars on the road driving under these conditions, which increases the chances of an accident occuring. (It was shown on a previous graph that most accidents occur at peak hour in the afternoon.) In darkness, the opposite trend occurs on sealed roads, with the number of accidents increasing at higher speed. High speed and darkness is a bad combination, regardless of road surface. It is also evident that the most common speed limits are 50, 60, 80, and 100, as few accidents occur at other speed limits.
+
+------
+
+# Reflection
+One of the challenges I had with this data set was that it consisted of a large number of categorical variables with many levels. In order to make it easier to analyse, I limited the number of levels (using Pareto charts to look at the top ten, for example). Also, finding relationships between categorical variables can be difficult too, because of this reason. Although I wanted to model the data, purely for the sake of producing a model, I could not find any variables that seemed worth modelling. Modelling should allow trends hidden in the data to be teased out, but trends in the data (such as in plot #1) could be easily seen in the graphs themselves without modelling.
+
+Plot #1 was my greatest success in analysing this data, since it contained so many interesting features and trends.
+
+Another challenge in analysing this data was that data for traffic volume was not included in the data set, making it hard to draw definitive conclusions about certain trends. A second data set with traffic volume on different road and under different conditions would be necessary to do this. This would be the best way to improve the analysis. In addition, weather is surely a factor in determining car accidents, and it would be interesting to add meteorological data to the analysis. Finally, the plot of crash frequency against year for different crash codes shows that code 130 has an increasing trend, unlike other crash codes. Code 130 is 'other maneuvering,' and it would be interesting to find out why it is increasing. However, I've spent too long on this project!
+
